@@ -16,6 +16,7 @@ import random
 
 import MySQLdb
 
+from dataclasses import dataclass
 
 def parse_n1mm(xml):
     global logging
@@ -33,15 +34,26 @@ def parse_n1mm(xml):
         return None
 
     result = {'format': 'N1MM'}
-    for k in ['call','band','txfreq','mode','timestamp',
+    for k in ['call','txfreq','mode','timestamp',
+                'exch1','exchange1',
                 'mycall','operator','ID',
                 'StationName','stationid','logger','app']:
         result[k] = getattr(root.find(f'./{k}'), 'text', None)
 
-    result['freq'] = result['txfreq']
+    if not result['txfreq']:
+        logging.error('ERROR: Missing txfreq')
+        return None
+
+    result['freq'] = result['txfreq'][:-2]
 
     if not result['StationName']:
         result['StationName'] = result['stationid']
+
+    if not result['operator']:
+        result['operator'] = result['StationName']
+
+    if not result['exchange1']:
+        result['exchange1'] = result['exch1']
 
     if not result['app']:
         result['app'] = result['logger']
@@ -57,14 +69,54 @@ def parse_wintest(data):
     logging.debug(wt)
 
     result = {'format': 'WinTest'}
-    for k in [('call',13),('freq',5),('timestamp',4)]:
+    for k in [('call',13),('freq',5),('timestamp',4),('mode',6),
+                ('r_rpt',15)]:
         result[k[0]] = wt[k[1]]
+
+    if not result['freq']:
+        logging.error('ERROR: Missing freq')
+        return None
+
+    result['freq'] = result['freq'][:-1]
+
+    if result['mode'] == '0':
+        result['mode'] = 'CW'
+        result['exchange1'] = result['r_rpt'][3:]
+    else:
+        result['mode'] = 'SSB'
+        result['exchange1'] = result['r_rpt'][2:]
+
 
     result['timestamp'] = datetime.utcfromtimestamp(int(result['timestamp'])).strftime('%Y-%m-%d %H:%M:%S')
     result['ID'] = 'WT' + ''.join(random.choices(string.ascii_letters + string.digits, k=14))
     result['app'] = 'WinTest'
 
     return result
+
+@dataclass
+class Band:
+    name: str
+    fmin: int   # kHz
+    fmax: int   # kHz
+
+BANDS = [
+    Band('160', 1_800,  2_000),
+    Band('80',  3_500,  3_800),
+    Band('40',  7_000,  7_200),
+    Band('30', 10_100, 10_150),
+    Band('20', 14_000, 14_350),
+    Band('17', 18_068, 18_168),
+    Band('15', 21_000, 21_450),
+    Band('12', 24_890, 24_990),
+    Band('10', 28_000, 30_000),
+]
+
+
+def freq2band(freq):
+    for b in BANDS:
+        if b.fmin <= freq <= b.fmax:
+            return b.name
+    return '???'
 
 
 def store_qso(qso):
@@ -76,14 +128,16 @@ def store_qso(qso):
         logging.error('ERROR: Bad freq')
         return
 
+    band = freq2band(freq)
+
     c = conn.cursor()
-    c.execute("""insert into qso (id, timestamp, `call`, `mode`, freq,
-                    mycall, operator,
+    c.execute("""insert into qso (id, timestamp, caller, `mode`, freq,
+                    band, mycall, exchange, operator,
                     station, logger,
                     from_ip, from_time)
-                values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
+                values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
                 (qso['ID'], qso['timestamp'], qso['call'], qso['mode'], freq,
-                    qso['mycall'], qso['operator'],
+                    band, qso['mycall'], qso['exchange1'], qso['operator'],
                     qso['StationName'], qso['app'],
                     qso['from_ip'], qso['from_time'])
             )

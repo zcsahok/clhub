@@ -2,6 +2,7 @@
 
 import sys
 import argparse
+import configparser
 import logging
 import gzip
 import socketserver
@@ -18,9 +19,9 @@ import MySQLdb
 
 from dataclasses import dataclass
 
-def parse_n1mm(xml):
-    global logging
+wintest_mycall = {}
 
+def parse_n1mm(xml):
     n = len(xml)
     for i in reversed(range(n)):
         if xml[i] == ord('>'):
@@ -70,6 +71,7 @@ def parse_wintest(data):
 
     result = {'format': 'WinTest'}
     for k in [('call',13),('freq',5),('timestamp',4),('mode',6),
+                ('operator',3),('StationName',1),
                 ('r_rpt',15)]:
         result[k[0]] = wt[k[1]]
 
@@ -85,6 +87,14 @@ def parse_wintest(data):
     else:
         result['mode'] = 'SSB'
         result['exchange1'] = result['r_rpt'][2:]
+
+    if not result['operator']:
+        logging.error('ERROR: Missing operator')
+        return None
+
+    result['mycall'] = wintest_mycall.get(result['operator'])
+    if not result['mycall']:
+        result['mycall'] = result['operator']
 
 
     result['timestamp'] = datetime.utcfromtimestamp(int(result['timestamp'])).strftime('%Y-%m-%d %H:%M:%S')
@@ -178,22 +188,45 @@ class MyTCPHandler(socketserver.BaseRequestHandler):
 #########################
 
 def process_args():
-    parser = argparse.ArgumentParser(description='ClubLog hub server')
+    config = configparser.ConfigParser()
+    config.read('clhub.ini')
+    if not config.has_section('options'):
+        config.add_section('options')
+    options = config['options']
+
+    # default values from [options]
+    tcp_host = options.getint('tcp.host', '0.0.0.0')
+    tcp_port = options.getint('tcp.port', 8432)
+    db_host = options.get('db.host', 'localhost')
+    db_port = options.getint('db.port', 3306)
+
+    if config.has_section('wintest.mycall'):
+        for operator in config.options('wintest.mycall'):
+            wintest_mycall[operator.upper()] = config.get('wintest.mycall', operator).upper()
+
+    parser = argparse.ArgumentParser(description='ClubLog hub server',
+            epilog='Note: options are first read from clhub.ini')
     parser.add_argument('-d', '--debug', action='store_true',
                     help='debug log level')
-    parser.add_argument('--tcp-host', metavar='HOST', type=str, default='0.0.0.0',
-                    help='TCP server host/IP (default: 0.0.0.0)')
-    parser.add_argument('--tcp-port', metavar='PORT', type=int, default=8432,
-                    help='TCP server port (default: 8432')
-    parser.add_argument('--db-host', metavar='HOST', type=str, default='localhost',
-                    help='MySQL DB host (default: localhost)')
-    parser.add_argument('--db-port', metavar='PORT', type=int, default=3306,
-                    help='MySQL DB server port (default: 3306)')
-    parser.add_argument('--db-user', metavar='USER', type=str, required=True, 
+    parser.add_argument('--tcp-host', metavar='HOST', type=str, default=tcp_host,
+                    help=f'TCP server host/IP (default: {tcp_host})')
+    parser.add_argument('--tcp-port', metavar='PORT', type=int, default=tcp_port,
+                    help=f'TCP server port (default: {tcp_port})')
+    parser.add_argument('--db-host', metavar='HOST', type=str, default=db_host,
+                    help=f'MySQL DB host (default: {db_host})')
+    parser.add_argument('--db-port', metavar='PORT', type=int, default=db_port,
+                    help=f'MySQL DB server port (default: {db_port})')
+    parser.add_argument('--db-user', metavar='USER', type=str,
+                    required='db.user' not in options,
+                    default=options.get('db.user'),
                     help='MySQL DB user')
     parser.add_argument('--db-password', metavar='PW', type=str,
-                    help='MySQL DB password (default: None)')
-    parser.add_argument('--db-name', metavar='DB', type=str, required=True, 
+                    default=options.get('db.password'),
+                    help='MySQL DB password'
+                        + (' (default: None)' if 'db.password' not in options else ''))
+    parser.add_argument('--db-name', metavar='DB', type=str,
+                    required='db.name' not in options,
+                    default=options.get('db.name'),
                     help='MySQL DB name')
 
     parsed_args, unparsed_args = parser.parse_known_args()
